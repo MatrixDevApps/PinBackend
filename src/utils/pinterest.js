@@ -234,7 +234,94 @@ function extractFromPWSData(html, $) {
 }
 
 /**
- * Strategy 2 — OG / Twitter meta tags (reliable fallback, lower quality).
+ * Strategy 2 — Parse the plain inline <script> that carries `initialReduxState`.
+ *
+ * Pinterest no longer puts pin data in `__PWS_DATA__`. Instead it embeds the
+ * full Redux store as a bare JSON object in a ~14 KB inline script:
+ *
+ *   <script>{"otaData":{…},"initialReduxState":{"pins":{…},"resources":{…}}}</script>
+ *
+ * Pin data lives in two possible sub-paths:
+ *   a) initialReduxState.pins[pinId]          — direct pin object
+ *   b) initialReduxState.resources.PinResource — cached API response
+ */
+function extractFromReduxState($) {
+  let reduxState = null;
+
+  $('script:not([src])').each((_, el) => {
+    if (reduxState) return false;
+    const src = ($(el).html() || '').trim();
+    // The target script starts with { and contains initialReduxState
+    if (!src.startsWith('{') || !src.includes('initialReduxState')) return;
+    try {
+      const parsed = JSON.parse(src);
+      if (parsed.initialReduxState) {
+        reduxState = parsed.initialReduxState;
+      }
+    } catch (_) { /* not valid JSON, skip */ }
+  });
+
+  if (!reduxState) return null;
+
+  // --- path (a): initialReduxState.pins ---
+  const pins = reduxState.pins;
+  if (pins && typeof pins === 'object' && !Array.isArray(pins)) {
+    for (const pin of Object.values(pins)) {
+      const result = pinObjectToMedia(pin);
+      if (result) return result;
+    }
+  }
+
+  // --- path (b): initialReduxState.resources.PinResource ---
+  const pinResource = reduxState.resources?.PinResource;
+  if (pinResource && typeof pinResource === 'object') {
+    for (const entry of Object.values(pinResource)) {
+      // Each entry may be { status, data } or the pin object directly
+      const pin = entry?.data ?? entry;
+      const result = pinObjectToMedia(pin);
+      if (result) return result;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Converts a Pinterest pin object (with .images / .videos keys) to our
+ * standard { type, media_url, thumbnail, title } shape.
+ * Returns null if no usable media found.
+ */
+function pinObjectToMedia(pin) {
+  if (!pin || typeof pin !== 'object') return null;
+
+  const title = (typeof pin.title === 'string' && pin.title.trim())
+    ? pin.title.trim()
+    : (typeof pin.description === 'string' && pin.description.trim())
+      ? pin.description.trim().slice(0, 120)
+      : 'Pinterest';
+
+  // Video pin
+  const videoList = pin.videos?.video_list;
+  if (videoList) {
+    const best = pickBestVideo(videoList);
+    if (best) {
+      const thumbnail = pickBestImage(pin.images) || null;
+      return { type: 'video', media_url: best.url, thumbnail, title };
+    }
+  }
+
+  // Image / GIF pin
+  const imageUrl = pickBestImage(pin.images);
+  if (imageUrl) {
+    const type = imageUrl.toLowerCase().endsWith('.gif') ? 'gif' : 'image';
+    return { type, media_url: imageUrl, thumbnail: imageUrl, title };
+  }
+
+  return null;
+}
+
+/**
+ * Strategy 3 — OG / Twitter meta tags (reliable fallback, lower quality).
  */
 function extractFromMetaTags($) {
   const get = (selectors) => {
@@ -302,11 +389,15 @@ async function extractPinterestMedia(url) {
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
 
-  // 3. Strategy 1: parse embedded PWS JSON (richest data)
+  // 3. Strategy 1: initialReduxState inline script (current Pinterest structure)
+  const reduxResult = extractFromReduxState($);
+  if (reduxResult) return reduxResult;
+
+  // 4. Strategy 2: __PWS_DATA__ / __PWS_INITIAL_DATA__ (older Pinterest structure)
   const pwsResult = extractFromPWSData(html, $);
   if (pwsResult) return pwsResult;
 
-  // 4. Strategy 2: OG / Twitter meta tags (fallback)
+  // 5. Strategy 3: OG / Twitter meta tags (last resort fallback)
   const metaResult = extractFromMetaTags($);
   if (metaResult) return metaResult;
 
