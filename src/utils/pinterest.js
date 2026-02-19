@@ -437,4 +437,25 @@ async function extractPinterestMedia(url) {
   );
 }
 
-module.exports = { extractPinterestMedia };
+/**
+ * Debug helper — returns the raw Redux state for a pin page.
+ * Used by the /api/debug-pin endpoint (development only).
+ */
+async function getRawPinState(url) {
+  if (/pin\.it\//i.test(url)) url = await resolveShortUrl(url);
+  const html = await fetchPage(url);
+  const $ = cheerio.load(html);
+  let reduxState = null;
+  $('script:not([src])').each((_, el) => {
+    if (reduxState) return false;
+    const src = ($(el).html() || '').trim();
+    if (!src.startsWith('{') || !src.includes('initialReduxState')) return;
+    try {
+      const parsed = JSON.parse(src);
+      if (parsed.initialReduxState) reduxState = parsed.initialReduxState;
+    } catch (_) {}
+  });
+  return reduxState;
+}
+
+module.exports = { extractPinterestMedia, getRawPinState };

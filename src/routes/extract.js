@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { extractPinterestMedia } = require('../utils/pinterest');
+const { extractPinterestMedia, getRawPinState } = require('../utils/pinterest');
 const { validatePinterestUrl } = require('../utils/validators');
 
 const router = express.Router();
@@ -33,6 +33,40 @@ router.post('/', async (req, res, next) => {
     });
   } catch (err) {
     next(err); // delegate to errorHandler middleware
+  }
+});
+
+/**
+ * POST /api/extract/debug-pin
+ * Returns raw Redux state for a pin — helps diagnose missing video data.
+ * Protected: only works when API_KEY env var is set and provided.
+ */
+router.post('/debug-pin', async (req, res, next) => {
+  // Only allow if API_KEY is configured
+  const requiredKey = process.env.API_KEY;
+  if (!requiredKey) return res.status(403).json({ error: 'Debug endpoint requires API_KEY to be set.' });
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '');
+  if (token !== requiredKey) return res.status(401).json({ error: 'Unauthorized.' });
+
+  try {
+    const { url } = req.body;
+    const validation = validatePinterestUrl(url);
+    if (!validation.valid) return res.status(400).json({ error: validation.error });
+
+    const state = await getRawPinState(validation.url);
+    if (!state) return res.status(422).json({ error: 'No Redux state found in page.' });
+
+    const pins = state.pins || {};
+    const pinResource = state.resources?.PinResource || {};
+
+    res.json({
+      pin_ids: Object.keys(pins),
+      pins: pins,
+      pinResource: pinResource,
+      storyPinData: state.storyPinData || {},
+    });
+  } catch (err) {
+    next(err);
   }
 });
 
