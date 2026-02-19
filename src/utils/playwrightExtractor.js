@@ -1,6 +1,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
+const { extractPinId, extractFromApi } = require('./pinterest');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,14 +51,25 @@ function deepFind(obj, key, seen = new WeakSet()) {
 /**
  * Extracts media from a Pinterest pin using headless Chromium.
  *
- * Pinterest loads video URLs entirely client-side via XHR requests to its own
- * API. This extractor intercepts those responses to capture video_list JSON
- * and also watches for direct v.pinimg.com MP4 network requests.
+ * First tries Pinterest's internal API directly (fast path, no browser needed).
+ * Falls back to full browser navigation if the API call returns no video,
+ * intercepting XHR responses and v.pinimg.com video CDN requests.
  *
  * @param {string} pinUrl  Canonical Pinterest pin URL
  * @returns {{ type, media_url, thumbnail, title } | null}
  */
 async function extractWithBrowser(pinUrl) {
+  // Fast path: try the Pinterest internal API first (same XHR the browser makes)
+  const pinId = extractPinId(pinUrl);
+  if (pinId) {
+    const apiResult = await extractFromApi(pinId);
+    // Only return the API result if it found a video — for images the regular
+    // /api/extract endpoint is already sufficient, so here we only short-circuit
+    // when we actually get a video URL.
+    if (apiResult?.type === 'video') return apiResult;
+  }
+
+  // Full browser path — needed when the API is blocked or returns no video
   let browser = null;
   try {
     browser = await chromium.launch({
@@ -69,6 +81,8 @@ async function extractWithBrowser(pinUrl) {
         '--disable-gpu',
         '--no-first-run',
         '--single-process',
+        // Prevent Pinterest from detecting headless/automation
+        '--disable-blink-features=AutomationControlled',
       ],
     });
 
@@ -78,6 +92,15 @@ async function extractWithBrowser(pinUrl) {
         '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       locale: 'en-US',
       viewport: { width: 1280, height: 800 },
+      // Mimic a real browser that has been used before
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    // Hide navigator.webdriver — the main signal Pinterest uses to detect bots
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
     const page = await context.newPage();

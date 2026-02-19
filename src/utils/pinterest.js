@@ -424,6 +424,60 @@ function extractFromMetaTags($, html) {
 }
 
 // ---------------------------------------------------------------------------
+// Pinterest internal API (Strategy 0)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the numeric pin ID from a canonical Pinterest pin URL.
+ * e.g. https://www.pinterest.com/pin/774124931181173/ → "774124931181173"
+ */
+function extractPinId(url) {
+  const m = url.match(/\/pin\/([a-zA-Z0-9_-]+)\/?/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Strategy 0 — Pinterest's internal PinResource XHR API.
+ *
+ * Pinterest's own frontend fetches pin data (including video_list) via:
+ *   GET /resource/PinResource/get/?data={"options":{"id":"PIN_ID",...}}
+ *
+ * Calling this directly with browser-mimicking headers returns the full pin
+ * JSON, including video URLs that are absent from the static HTML page.
+ */
+async function extractFromApi(pinId) {
+  const data = JSON.stringify({
+    options: { id: pinId, field_set_key: 'unauth_react' },
+    context: {},
+  });
+
+  const apiUrl =
+    `https://www.pinterest.com/resource/PinResource/get/` +
+    `?data=${encodeURIComponent(data)}&_=${Date.now()}`;
+
+  let res;
+  try {
+    res = await axios.get(apiUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        Referer: `https://www.pinterest.com/pin/${pinId}/`,
+      },
+      timeout: 15_000,
+    });
+  } catch (err) {
+    // Non-fatal: fall through to HTML-based strategies
+    return null;
+  }
+
+  const pin = res.data?.resource_response?.data;
+  if (!pin) return null;
+
+  return pinObjectToMedia(pin);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -446,23 +500,29 @@ async function extractPinterestMedia(url) {
     url = await resolveShortUrl(url);
   }
 
-  // 2. Fetch the pin page HTML
+  // 2. Strategy 0: Pinterest's own internal API (fastest, returns full pin JSON)
+  const pinId = extractPinId(url);
+  if (pinId) {
+    const apiResult = await extractFromApi(pinId);
+    if (apiResult) return apiResult;
+  }
+
+  // 3. Fetch the pin page HTML for HTML-based strategies
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
 
-  // 3. Strategy 1: initialReduxState inline script (current Pinterest structure)
+  // 4. Strategy 1: initialReduxState inline script (current Pinterest structure)
   const reduxResult = extractFromReduxState($);
   if (reduxResult) return reduxResult;
 
-  // 4. Strategy 2: __PWS_DATA__ / __PWS_INITIAL_DATA__ (older Pinterest structure)
+  // 5. Strategy 2: __PWS_DATA__ / __PWS_INITIAL_DATA__ (older Pinterest structure)
   const pwsResult = extractFromPWSData(html, $);
   if (pwsResult) return pwsResult;
 
-  // 5. Strategy 3: OG / Twitter meta tags (last resort fallback)
+  // 6. Strategy 3: OG / Twitter meta tags (last resort fallback)
   const metaResult = extractFromMetaTags($, html);
   if (metaResult) return metaResult;
 
-  // 5. Nothing worked
   throw Object.assign(
     new Error(
       'Could not extract media from this pin. ' +
@@ -472,4 +532,4 @@ async function extractPinterestMedia(url) {
   );
 }
 
-module.exports = { extractPinterestMedia };
+module.exports = { extractPinterestMedia, extractPinId, extractFromApi };
