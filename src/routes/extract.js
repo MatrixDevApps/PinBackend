@@ -55,13 +55,17 @@ router.post('/debug-pin', async (req, res, next) => {
     const state = await getRawPinState(validation.url);
     if (!state) return res.status(422).json({ error: 'No Redux state found in page.' });
 
-    const pins = state.pins || {};
-    const pinResource = state.resources?.PinResource || {};
+    // Summarise every top-level key and its JSON size so we can spot where pin data hides
+    const summary = {};
+    for (const [k, v] of Object.entries(state)) {
+      const str = JSON.stringify(v);
+      summary[k] = { size: str.length, hasVideo: str.includes('video_list') || str.includes('v.pinimg.com'), hasImage: str.includes('i.pinimg.com') };
+    }
 
     res.json({
-      pin_ids: Object.keys(pins),
-      pins: pins,
-      pinResource: pinResource,
+      state_keys_summary: summary,
+      pins: state.pins || {},
+      pinResource: state.resources?.PinResource || {},
       storyPinData: state.storyPinData || {},
     });
   } catch (err) {
