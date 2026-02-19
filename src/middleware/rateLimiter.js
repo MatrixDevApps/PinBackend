@@ -28,4 +28,25 @@ const extractLimiter = rateLimit({
   keyGenerator: (req) => req.ip,
 });
 
-module.exports = { extractLimiter };
+/**
+ * Rate limiter for the /api/extract/browser endpoint.
+ * Lower limit (5 req/min) because each request spawns a full browser instance.
+ */
+const browserLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+
+  handler(req, res) {
+    res.status(429).json({
+      success: false,
+      error: 'Rate limit exceeded. Browser extraction allows up to 5 requests per minute.',
+      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000 - Date.now() / 1000),
+    });
+  },
+
+  keyGenerator: (req) => req.ip,
+});
+
+module.exports = { extractLimiter, browserLimiter };

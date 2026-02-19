@@ -5,10 +5,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const { extractLimiter } = require('./middleware/rateLimiter');
+const { extractLimiter, browserLimiter } = require('./middleware/rateLimiter');
 const { errorHandler } = require('./middleware/errorHandler');
 const { apiKeyAuth } = require('./middleware/apiKey');
 const extractRouter = require('./routes/extract');
+const browserRouter = require('./routes/browser');
 
 // ---------------------------------------------------------------------------
 // App setup
@@ -55,9 +56,15 @@ app.get('/health', (_req, res) => {
 
 /**
  * POST /api/extract
- * Requires: rate limiter + optional API key auth
+ * Fast static extraction (axios + cheerio). 30 req/min.
  */
 app.use('/api/extract', extractLimiter, apiKeyAuth, extractRouter);
+
+/**
+ * POST /api/extract/browser
+ * Headless Chromium extraction for video pins. 5 req/min.
+ */
+app.use('/api/extract/browser', browserLimiter, apiKeyAuth, browserRouter);
 
 // 404 — catch-all for unknown routes
 app.use((_req, res) => {
