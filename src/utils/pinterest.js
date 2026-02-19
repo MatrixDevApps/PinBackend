@@ -71,7 +71,8 @@ async function resolveShortUrl(url) {
 }
 
 /**
- * GETs a Pinterest pin page and returns the raw HTML string.
+ * GETs a Pinterest pin page and returns the raw HTML string plus any
+ * session cookies set by Pinterest (needed to authenticate API calls).
  */
 async function fetchPage(url) {
   const res = await axios.get(url, {
@@ -79,7 +80,14 @@ async function fetchPage(url) {
     timeout: 20_000,
     maxRedirects: 10,
   });
-  return res.data;
+
+  // Collect cookies from Set-Cookie response headers so we can replay them
+  // in subsequent API calls (Pinterest's /resource/ endpoints need a valid
+  // csrftoken cookie to return data instead of 403).
+  const setCookies = res.headers['set-cookie'] || [];
+  const cookies = setCookies.map((c) => c.split(';')[0]).join('; ');
+
+  return { html: res.data, cookies };
 }
 
 // ---------------------------------------------------------------------------
@@ -442,10 +450,19 @@ function extractPinId(url) {
  * Pinterest's own frontend fetches pin data (including video_list) via:
  *   GET /resource/PinResource/get/?data={"options":{"id":"PIN_ID",...}}
  *
- * Calling this directly with browser-mimicking headers returns the full pin
- * JSON, including video URLs that are absent from the static HTML page.
+ * The endpoint requires the session cookies that Pinterest sets when the
+ * page first loads (particularly csrftoken). We pass the cookies collected
+ * during fetchPage() so this call is authenticated the same way a real
+ * browser would be.
+ *
+ * @param {string} pinId
+ * @param {string} cookies  Raw "name=value; name2=value2" cookie string
  */
-async function extractFromApi(pinId) {
+async function extractFromApi(pinId, cookies) {
+  // Extract CSRF token from the cookie string
+  const csrfMatch = (cookies || '').match(/csrftoken=([^;]+)/);
+  const csrfToken = csrfMatch ? csrfMatch[1] : '';
+
   const data = JSON.stringify({
     options: { id: pinId, field_set_key: 'unauth_react' },
     context: {},
@@ -462,11 +479,13 @@ async function extractFromApi(pinId) {
         ...BROWSER_HEADERS,
         Accept: 'application/json, text/javascript, */*; q=0.01',
         'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRFToken': csrfToken,
         Referer: `https://www.pinterest.com/pin/${pinId}/`,
+        Cookie: cookies || '',
       },
       timeout: 15_000,
     });
-  } catch (err) {
+  } catch (_) {
     // Non-fatal: fall through to HTML-based strategies
     return null;
   }
@@ -500,16 +519,17 @@ async function extractPinterestMedia(url) {
     url = await resolveShortUrl(url);
   }
 
-  // 2. Strategy 0: Pinterest's own internal API (fastest, returns full pin JSON)
+  // 2. Fetch the pin page HTML + session cookies in one request
+  const { html, cookies } = await fetchPage(url);
+  const $ = cheerio.load(html);
   const pinId = extractPinId(url);
+
+  // 3. Strategy 0: Pinterest internal API (uses session cookies from step 2)
+  //    This is the only reliable way to get video URLs for video pins.
   if (pinId) {
-    const apiResult = await extractFromApi(pinId);
+    const apiResult = await extractFromApi(pinId, cookies);
     if (apiResult) return apiResult;
   }
-
-  // 3. Fetch the pin page HTML for HTML-based strategies
-  const html = await fetchPage(url);
-  const $ = cheerio.load(html);
 
   // 4. Strategy 1: initialReduxState inline script (current Pinterest structure)
   const reduxResult = extractFromReduxState($);
@@ -532,4 +552,4 @@ async function extractPinterestMedia(url) {
   );
 }
 
-module.exports = { extractPinterestMedia, extractPinId, extractFromApi };
+module.exports = { extractPinterestMedia, extractPinId, extractFromApi, fetchPage };

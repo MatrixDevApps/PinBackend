@@ -1,7 +1,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const { extractPinId, extractFromApi } = require('./pinterest');
+const { extractPinId, extractFromApi, fetchPage } = require('./pinterest');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,14 +59,15 @@ function deepFind(obj, key, seen = new WeakSet()) {
  * @returns {{ type, media_url, thumbnail, title } | null}
  */
 async function extractWithBrowser(pinUrl) {
-  // Fast path: try the Pinterest internal API first (same XHR the browser makes)
+  // Fast path: fetch the page to get session cookies, then hit the API
+  // (same flow a real browser uses, so the API returns full pin JSON)
   const pinId = extractPinId(pinUrl);
   if (pinId) {
-    const apiResult = await extractFromApi(pinId);
-    // Only return the API result if it found a video — for images the regular
-    // /api/extract endpoint is already sufficient, so here we only short-circuit
-    // when we actually get a video URL.
-    if (apiResult?.type === 'video') return apiResult;
+    try {
+      const { cookies } = await fetchPage(pinUrl);
+      const apiResult = await extractFromApi(pinId, cookies);
+      if (apiResult?.type === 'video') return apiResult;
+    } catch (_) { /* fall through to Playwright */ }
   }
 
   // Full browser path — needed when the API is blocked or returns no video
