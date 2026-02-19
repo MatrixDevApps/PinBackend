@@ -398,10 +398,13 @@ function findOriginalImageInHtml(html, ogImageUrl) {
  * We prefer direct MP4 over HLS, and higher resolution over lower.
  */
 function extractFromRelayScripts($) {
+  // Quality-specific MP4 keys (e.g. videoList720P.v720P.url)
   const MP4_QUALITY_KEYS = [
     'videoList1080P', 'videoList720P', 'videoList480P', 'videoList360P', 'videoList240P',
+    // Mixed-quality list: videoList.v720P.url or videoList.vHLSV4.url
+    'videoList',
   ];
-  const HLS_KEYS = ['v_hlsv4_video_list', 'videoListMobile'];
+  const HLS_KEYS = ['v_hlsv4_video_list', 'videoListMobile', 'videoList'];
 
   const MARKER = '__PWS_RELAY_REGISTER_COMPLETED_REQUEST__("';
   let bestResult = null;
@@ -434,7 +437,9 @@ function extractFromRelayScripts($) {
     // Grab thumbnail and title from the response
     const thumbCandidates = deepFind(json, 'thumbnail');
     const thumbnail =
-      thumbCandidates.find((t) => typeof t === 'string' && t.includes('pinimg.com')) || null;
+      thumbCandidates.find((t) => typeof t === 'string' && t.includes('pinimg.com')) ||
+      $('meta[property="og:image"]').attr('content') ||
+      null;
     const titleCandidates = [...deepFind(json, 'pinTitle'), ...deepFind(json, 'description')];
     const title =
       titleCandidates.find((t) => typeof t === 'string' && t.trim()) || 'Pinterest Video';
