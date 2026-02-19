@@ -384,7 +384,95 @@ function findOriginalImageInHtml(html, ogImageUrl) {
 }
 
 /**
- * Strategy 3 — OG / Twitter meta tags.
+ * Strategy 3 — Pinterest Relay (GraphQL) response scripts.
+ *
+ * Modern Pinterest pages embed pin data via calls of the form:
+ *   window.__PWS_RELAY_REGISTER_COMPLETED_REQUEST__("<url-encoded-query>", {raw JSON});
+ *
+ * The FIRST argument is a short URL-encoded query object (queryID + variables).
+ * The SECOND argument is the raw JSON response containing all pin data, including
+ * video URLs under keys like:
+ *   videoList720P, videoList1080P, videoList480P  → direct MP4 files
+ *   v_hlsv4_video_list, videoListMobile           → HLS (.m3u8) streams
+ *
+ * We prefer direct MP4 over HLS, and higher resolution over lower.
+ */
+function extractFromRelayScripts($) {
+  const MP4_QUALITY_KEYS = [
+    'videoList1080P', 'videoList720P', 'videoList480P', 'videoList360P', 'videoList240P',
+  ];
+  const HLS_KEYS = ['v_hlsv4_video_list', 'videoListMobile'];
+
+  const MARKER = '__PWS_RELAY_REGISTER_COMPLETED_REQUEST__("';
+  let bestResult = null;
+
+  $('script:not([src])').each((_, el) => {
+    if (bestResult) return false;
+    const src = $(el).html() || '';
+    if (!src.includes(MARKER)) return;
+
+    // Find where the first (URL-encoded) argument ends: look for `",` pattern
+    const markerIdx = src.indexOf(MARKER);
+    const firstArgEnd = src.indexOf('",', markerIdx + MARKER.length);
+    if (firstArgEnd === -1) return;
+
+    // Second argument starts right after `", ` (the comma-space separator)
+    const secondArgStart = firstArgEnd + 2;
+    const secondArgRaw = src.slice(secondArgStart);
+
+    // The second argument is a raw JSON object; it ends just before `});`
+    const closingIdx = secondArgRaw.lastIndexOf('});');
+    const jsonStr = closingIdx !== -1
+      ? secondArgRaw.slice(0, closingIdx + 1) // include the final `}`
+      : secondArgRaw.slice(0, secondArgRaw.lastIndexOf('}') + 1);
+
+    let json;
+    try {
+      json = JSON.parse(jsonStr);
+    } catch (_) { return; }
+
+    // Grab thumbnail and title from the response
+    const thumbCandidates = deepFind(json, 'thumbnail');
+    const thumbnail =
+      thumbCandidates.find((t) => typeof t === 'string' && t.includes('pinimg.com')) || null;
+    const titleCandidates = [...deepFind(json, 'pinTitle'), ...deepFind(json, 'description')];
+    const title =
+      titleCandidates.find((t) => typeof t === 'string' && t.trim()) || 'Pinterest Video';
+
+    // Try MP4 keys first
+    for (const key of MP4_QUALITY_KEYS) {
+      const videoLists = deepFind(json, key);
+      for (const vl of videoLists) {
+        if (!vl || typeof vl !== 'object') continue;
+        for (const entry of Object.values(vl)) {
+          if (entry?.url && !entry.url.includes('.m3u8')) {
+            bestResult = { type: 'video', media_url: entry.url, thumbnail, title };
+            return false;
+          }
+        }
+      }
+    }
+
+    // Fall back to HLS
+    for (const key of HLS_KEYS) {
+      const videoLists = deepFind(json, key);
+      for (const vl of videoLists) {
+        if (!vl || typeof vl !== 'object') continue;
+        for (const entry of Object.values(vl)) {
+          if (entry?.url) {
+            bestResult = { type: 'video', media_url: entry.url, thumbnail, title };
+            return false;
+          }
+        }
+      }
+    }
+  });
+
+  return bestResult;
+}
+
+/**
+ * Strategy 4 — OG / Twitter meta tags.
  * Pinterest reliably serves og:image and og:title for all public pins.
  * For video pins: og:video is often absent (video loads client-side),
  * so we return the best available image as the media URL.
@@ -539,7 +627,11 @@ async function extractPinterestMedia(url) {
   const pwsResult = extractFromPWSData(html, $);
   if (pwsResult) return pwsResult;
 
-  // 6. Strategy 3: OG / Twitter meta tags (last resort fallback)
+  // 6. Strategy 3: Relay (GraphQL) scripts — videoList720P / v_hlsv4_video_list
+  const relayResult = extractFromRelayScripts($);
+  if (relayResult) return relayResult;
+
+  // 7. Strategy 4: OG / Twitter meta tags (last resort fallback)
   const metaResult = extractFromMetaTags($, html);
   if (metaResult) return metaResult;
 
