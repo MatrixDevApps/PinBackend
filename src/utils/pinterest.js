@@ -347,9 +347,41 @@ function pinObjectToMedia(pin) {
 }
 
 /**
- * Strategy 3 — OG / Twitter meta tags (reliable fallback, lower quality).
+ * Upgrades a Pinterest CDN image URL to the highest available quality.
+ * Pinterest CDN paths: /736x/ /474x/ /236x/ → /originals/
  */
-function extractFromMetaTags($) {
+function upgradeImageQuality(url) {
+  if (!url) return url;
+  return url.replace(/\/\d+x\//, '/originals/');
+}
+
+/**
+ * Scans the raw HTML for the highest-quality image URL (originals).
+ * Pinterest often preloads the original image even when og:image is 736x.
+ */
+function findOriginalImageInHtml(html, ogImageUrl) {
+  if (!ogImageUrl) return null;
+
+  // Extract the image hash from the og:image URL and look for originals version
+  const hashMatch = ogImageUrl.match(/\/([a-f0-9]{32})\./);
+  if (!hashMatch) return null;
+
+  const hash = hashMatch[1];
+  const parts = [hash.slice(0, 2), hash.slice(2, 4), hash.slice(4, 6)].join('/');
+  const originalsPattern = new RegExp(
+    `https://i\\.pinimg\\.com/originals/${parts}/${hash}\\.[a-z]+`, 'i'
+  );
+  const match = html.match(originalsPattern);
+  return match ? match[0] : null;
+}
+
+/**
+ * Strategy 3 — OG / Twitter meta tags.
+ * Pinterest reliably serves og:image and og:title for all public pins.
+ * For video pins: og:video is often absent (video loads client-side),
+ * so we return the best available image as the media URL.
+ */
+function extractFromMetaTags($, html) {
   const get = (selectors) => {
     for (const sel of selectors) {
       const val = $(sel).attr('content');
@@ -365,7 +397,7 @@ function extractFromMetaTags($) {
     'meta[name="twitter:player:stream"]',
   ]);
 
-  const imageUrl = get([
+  const ogImageUrl = get([
     'meta[property="og:image"]',
     'meta[name="twitter:image:src"]',
     'meta[name="twitter:image"]',
@@ -377,12 +409,15 @@ function extractFromMetaTags($) {
     'Pinterest';
 
   if (videoUrl) {
-    return { type: 'video', media_url: videoUrl, thumbnail: imageUrl || null, title };
+    const thumbnail = ogImageUrl || null;
+    return { type: 'video', media_url: videoUrl, thumbnail, title };
   }
 
-  if (imageUrl) {
-    const type = imageUrl.toLowerCase().endsWith('.gif') ? 'gif' : 'image';
-    return { type, media_url: imageUrl, thumbnail: imageUrl, title };
+  if (ogImageUrl) {
+    // Try to get originals quality instead of 736x
+    const originalsUrl = findOriginalImageInHtml(html, ogImageUrl) || upgradeImageQuality(ogImageUrl);
+    const type = originalsUrl.toLowerCase().endsWith('.gif') ? 'gif' : 'image';
+    return { type, media_url: originalsUrl, thumbnail: ogImageUrl, title };
   }
 
   return null;
@@ -424,7 +459,7 @@ async function extractPinterestMedia(url) {
   if (pwsResult) return pwsResult;
 
   // 5. Strategy 3: OG / Twitter meta tags (last resort fallback)
-  const metaResult = extractFromMetaTags($);
+  const metaResult = extractFromMetaTags($, html);
   if (metaResult) return metaResult;
 
   // 5. Nothing worked
@@ -437,47 +472,4 @@ async function extractPinterestMedia(url) {
   );
 }
 
-/**
- * Debug helper — returns raw data from all extraction sources for a pin page.
- * Used by the /api/debug-pin endpoint (development only).
- */
-async function getRawPinState(url) {
-  if (/pin\.it\//i.test(url)) url = await resolveShortUrl(url);
-  const html = await fetchPage(url);
-  const $ = cheerio.load(html);
-
-  let reduxState = null;
-  let pwsData = null;
-
-  $('script:not([src])').each((_, el) => {
-    const src = ($(el).html() || '').trim();
-    if (!reduxState && src.startsWith('{') && src.includes('initialReduxState')) {
-      try {
-        const p = JSON.parse(src);
-        if (p.initialReduxState) reduxState = p.initialReduxState;
-      } catch (_) {}
-    }
-    if (!pwsData && (src.includes('__PWS_DATA__') || $(el).attr('id') === '__PWS_DATA__')) {
-      try { pwsData = JSON.parse(src); } catch (_) {}
-    }
-  });
-
-  // Also check <script id="__PWS_DATA__">
-  if (!pwsData) {
-    const inlineScript = $('#__PWS_DATA__').html();
-    if (inlineScript) { try { pwsData = JSON.parse(inlineScript.trim()); } catch (_) {} }
-  }
-
-  // OG meta tags
-  const ogImage = $('meta[property="og:image"]').attr('content') || null;
-  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content') || null;
-  const ogTitle = $('meta[property="og:title"]').attr('content') || null;
-
-  // Find all v.pinimg.com and i.pinimg.com URLs in raw HTML
-  const videoUrls = [...new Set([...html.matchAll(/https:\/\/v\.pinimg\.com\/[^\s"'<]+\.mp4/g)].map(m => m[0]))];
-  const imageUrls = [...new Set([...html.matchAll(/https:\/\/i\.pinimg\.com\/originals\/[^\s"'<]+/g)].map(m => m[0]))];
-
-  return { reduxState, pwsData, ogImage, ogVideo, ogTitle, videoUrls, imageUrls };
-}
-
-module.exports = { extractPinterestMedia, getRawPinState };
+module.exports = { extractPinterestMedia };
