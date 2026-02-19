@@ -287,9 +287,11 @@ function extractFromReduxState($) {
 }
 
 /**
- * Converts a Pinterest pin object (with .images / .videos keys) to our
- * standard { type, media_url, thumbnail, title } shape.
- * Returns null if no usable media found.
+ * Converts a Pinterest pin object to our standard media shape.
+ * Handles three pin formats:
+ *   1. Regular video pin  — pin.videos.video_list
+ *   2. Idea / Story pin   — pin.story_pin_data.pages[].blocks[].video.video_list
+ *   3. Image / GIF pin    — pin.images
  */
 function pinObjectToMedia(pin) {
   if (!pin || typeof pin !== 'object') return null;
@@ -300,21 +302,45 @@ function pinObjectToMedia(pin) {
       ? pin.description.trim().slice(0, 120)
       : 'Pinterest';
 
-  // Video pin
+  const thumbnail = pickBestImage(pin.images) || null;
+
+  // --- Format 1: regular video pin (pin.videos.video_list) ---
   const videoList = pin.videos?.video_list;
   if (videoList) {
     const best = pickBestVideo(videoList);
-    if (best) {
-      const thumbnail = pickBestImage(pin.images) || null;
-      return { type: 'video', media_url: best.url, thumbnail, title };
+    if (best) return { type: 'video', media_url: best.url, thumbnail, title };
+  }
+
+  // --- Format 2: Idea Pin / Story Pin (pin.story_pin_data) ---
+  // Pages → blocks → block.video.video_list
+  const pages = pin.story_pin_data?.pages;
+  if (Array.isArray(pages)) {
+    for (const page of pages) {
+      for (const block of (page?.blocks || [])) {
+        const storyVideoList = block?.video?.video_list ?? block?.block?.video?.video_list;
+        if (storyVideoList) {
+          const best = pickBestVideo(storyVideoList);
+          if (best) {
+            // Use page cover image as thumbnail if available
+            const storyThumb = pickBestImage(page?.image) || thumbnail;
+            return { type: 'video', media_url: best.url, thumbnail: storyThumb, title };
+          }
+        }
+      }
     }
   }
 
-  // Image / GIF pin
-  const imageUrl = pickBestImage(pin.images);
-  if (imageUrl) {
-    const type = imageUrl.toLowerCase().endsWith('.gif') ? 'gif' : 'image';
-    return { type, media_url: imageUrl, thumbnail: imageUrl, title };
+  // --- Format 3: use deepFind as last resort for any video_list anywhere in pin ---
+  const videoLists = deepFind(pin, 'video_list');
+  for (const vl of videoLists) {
+    const best = pickBestVideo(vl);
+    if (best) return { type: 'video', media_url: best.url, thumbnail, title };
+  }
+
+  // --- Image / GIF pin ---
+  if (thumbnail) {
+    const type = thumbnail.toLowerCase().endsWith('.gif') ? 'gif' : 'image';
+    return { type, media_url: thumbnail, thumbnail, title };
   }
 
   return null;
