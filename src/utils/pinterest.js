@@ -438,24 +438,46 @@ async function extractPinterestMedia(url) {
 }
 
 /**
- * Debug helper — returns the raw Redux state for a pin page.
+ * Debug helper — returns raw data from all extraction sources for a pin page.
  * Used by the /api/debug-pin endpoint (development only).
  */
 async function getRawPinState(url) {
   if (/pin\.it\//i.test(url)) url = await resolveShortUrl(url);
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
+
   let reduxState = null;
+  let pwsData = null;
+
   $('script:not([src])').each((_, el) => {
-    if (reduxState) return false;
     const src = ($(el).html() || '').trim();
-    if (!src.startsWith('{') || !src.includes('initialReduxState')) return;
-    try {
-      const parsed = JSON.parse(src);
-      if (parsed.initialReduxState) reduxState = parsed.initialReduxState;
-    } catch (_) {}
+    if (!reduxState && src.startsWith('{') && src.includes('initialReduxState')) {
+      try {
+        const p = JSON.parse(src);
+        if (p.initialReduxState) reduxState = p.initialReduxState;
+      } catch (_) {}
+    }
+    if (!pwsData && (src.includes('__PWS_DATA__') || $(el).attr('id') === '__PWS_DATA__')) {
+      try { pwsData = JSON.parse(src); } catch (_) {}
+    }
   });
-  return reduxState;
+
+  // Also check <script id="__PWS_DATA__">
+  if (!pwsData) {
+    const inlineScript = $('#__PWS_DATA__').html();
+    if (inlineScript) { try { pwsData = JSON.parse(inlineScript.trim()); } catch (_) {} }
+  }
+
+  // OG meta tags
+  const ogImage = $('meta[property="og:image"]').attr('content') || null;
+  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content') || null;
+  const ogTitle = $('meta[property="og:title"]').attr('content') || null;
+
+  // Find all v.pinimg.com and i.pinimg.com URLs in raw HTML
+  const videoUrls = [...new Set([...html.matchAll(/https:\/\/v\.pinimg\.com\/[^\s"'<]+\.mp4/g)].map(m => m[0]))];
+  const imageUrls = [...new Set([...html.matchAll(/https:\/\/i\.pinimg\.com\/originals\/[^\s"'<]+/g)].map(m => m[0]))];
+
+  return { reduxState, pwsData, ogImage, ogVideo, ogTitle, videoUrls, imageUrls };
 }
 
 module.exports = { extractPinterestMedia, getRawPinState };

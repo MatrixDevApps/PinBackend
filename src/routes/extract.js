@@ -52,21 +52,32 @@ router.post('/debug-pin', async (req, res, next) => {
     const validation = validatePinterestUrl(url);
     if (!validation.valid) return res.status(400).json({ error: validation.error });
 
-    const state = await getRawPinState(validation.url);
-    if (!state) return res.status(422).json({ error: 'No Redux state found in page.' });
+    const raw = await getRawPinState(validation.url);
+    if (!raw) return res.status(422).json({ error: 'Failed to fetch pin page.' });
 
-    // Summarise every top-level key and its JSON size so we can spot where pin data hides
-    const summary = {};
-    for (const [k, v] of Object.entries(state)) {
+    const { reduxState, pwsData, ogImage, ogVideo, ogTitle, videoUrls, imageUrls } = raw;
+
+    // Summarise redux state keys
+    const reduxSummary = {};
+    for (const [k, v] of Object.entries(reduxState || {})) {
       const str = JSON.stringify(v);
-      summary[k] = { size: str.length, hasVideo: str.includes('video_list') || str.includes('v.pinimg.com'), hasImage: str.includes('i.pinimg.com') };
+      reduxSummary[k] = { size: str.length, hasVideo: str.includes('video_list') || str.includes('v.pinimg.com'), hasImage: str.includes('i.pinimg.com') };
+    }
+
+    // Summarise pws data keys
+    const pwsSummary = {};
+    for (const [k, v] of Object.entries(pwsData || {})) {
+      const str = JSON.stringify(v);
+      pwsSummary[k] = { size: str.length, hasVideo: str.includes('video_list') || str.includes('v.pinimg.com'), hasImage: str.includes('i.pinimg.com') };
     }
 
     res.json({
-      state_keys_summary: summary,
-      pins: state.pins || {},
-      pinResource: state.resources?.PinResource || {},
-      storyPinData: state.storyPinData || {},
+      og: { image: ogImage, video: ogVideo, title: ogTitle },
+      raw_html_video_urls: videoUrls,
+      raw_html_image_urls: imageUrls,
+      redux_keys: reduxSummary,
+      pws_keys: pwsSummary,
+      pws_context: pwsData?.context || null,
     });
   } catch (err) {
     next(err);
